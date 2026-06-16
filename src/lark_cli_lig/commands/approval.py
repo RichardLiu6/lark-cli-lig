@@ -231,24 +231,46 @@ def approval_get(ctx: click.Context, instance_code: str) -> None:
             click.echo(line)
 
 
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic"}
+
+
 @approval.command("upload")
 @click.argument("file", type=click.Path(exists=True))
+@click.option(
+    "--type",
+    "upload_type",
+    type=click.Choice(["image", "attachment"]),
+    default=None,
+    help=(
+        "Target field type. 'image' (for image widgets) auto-converts PDF→PNG "
+        "but only keeps page 1 — use pdf_split.py first for multi-page. "
+        "'attachment' (for attachmentV2 widgets) keeps original format. "
+        "Default: auto-detect by extension (image for jpg/png/etc, attachment for others)."
+    ),
+)
 @click.pass_context
-def approval_upload(ctx: click.Context, file: str) -> None:
-    """Upload an image for approval (supports PDF auto-convert)."""
+def approval_upload(ctx: click.Context, file: str, upload_type: str | None) -> None:
+    """Upload a file for approval. Auto-detects image vs attachment by extension."""
     filepath = Path(file)
     filename = filepath.name
     ext = filepath.suffix.lower()
 
-    # If PDF, convert to PNG first
-    if ext == ".pdf":
+    # Auto-detect target field type if not specified
+    if upload_type is None:
+        upload_type = "image" if ext in _IMAGE_EXTS else "attachment"
+
+    # Only convert PDF→PNG when target is an image field (image widget needs page-1 PNG)
+    if ext == ".pdf" and upload_type == "image":
         try:
             from pdf2image import convert_from_path
         except ImportError:
             raise click.ClickException(
                 "pdf2image is required for PDF conversion. Install with: pip install pdf2image"
             )
-        click.echo("Converting PDF to PNG...")
+        click.echo(
+            "Warning: uploading PDF to image field — only page 1 will render. "
+            "Use scripts/pdf_split.py first if you need all pages."
+        )
         imgs = convert_from_path(str(filepath), dpi=200)
         tmp_path = Path("/tmp/lark-approval-upload.png")
         imgs[0].save(str(tmp_path), "PNG")
@@ -262,7 +284,7 @@ def approval_upload(ctx: click.Context, file: str) -> None:
             data = api.upload(
                 "/open-apis/approval/v4/files/upload",
                 files={"content": (filename, f, "application/octet-stream")},
-                data={"name": filename, "type": "image"},
+                data={"name": filename, "type": upload_type},
             )
     except LarkAPIError as e:
         raise click.ClickException(str(e))
