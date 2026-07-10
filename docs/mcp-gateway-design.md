@@ -51,16 +51,16 @@
 
 原则：**子工具 = 功能角色，不暴露原始能力**。绝不暴露 `api` 透传、绝不暴露 `--as bot`。
 
-| MCP 工具 | 作用 | 可见角色 | 关键约束 |
-|---|---|---|---|
-| `lark_send_message` | 给同事发文本 | all | 以**调用者本人**身份发；收件人 email/open_id |
-| `lark_send_file` | 发文件 | all（可加确认） | 同上；大文件/群发要 confirm |
-| `lark_read_my_messages` | 读**自己**的私聊 | all | 只能读本人会话 |
-| `lark_list_my_contacts` | 查**本部门**通讯录 | all | 非全组织导出 |
-| `lark_list_my_approvals` | 查**自己**的审批 | all | 只本人提交/相关 |
-| `lark_submit_approval` | 发起审批 | 按角色 | **open_id 服务端强制=调用者本人**（防冒名） |
-| `lark_get_approval` | 查审批详情 | all | 限本人可见 |
-| `lark_export_contacts` | 全组织通讯录导出 | **admin only** | 高敏，默认不给普通角色 |
+| MCP 工具 | 作用 | 执行身份 | 可见角色 | 关键约束 |
+|---|---|---|---|---|
+| `lark_send_message` | 给同事发文本 | **本人** | all | 以本人身份发；收件人 email/open_id |
+| `lark_send_file` | 发文件 | **本人** | all（可加确认） | 同上；大文件/群发要 confirm |
+| `lark_read_my_messages` | 读自己的私聊 | **本人** | all | 只能读本人会话 |
+| `lark_list_my_contacts` | 查本部门通讯录 | **本人** | all | 非全组织导出 |
+| `lark_list_my_approvals` | 查自己的审批 | bot + 本人 open_id | all | 只本人提交/相关 |
+| `lark_submit_approval` | 发起审批 | bot + **强制本人 open_id** | 按角色 | 防冒名 |
+| `lark_get_approval` | 查审批详情 | bot | all | 限本人可见；审计绑定触发人 |
+| `lark_export_contacts` | 全组织通讯录导出 | bot | **admin only** | 高敏；审计绑定触发人 |
 
 **结果契约（每个工具统一返回，feedback-rich）**：
 ```json
@@ -83,13 +83,19 @@
 - 回显 `resolved_command`，保住 agent"改个参数重试"的能力。
 - 不可信调用方的越权信息按权限范围擦除（反馈范围跟着能力范围走），但**本人自己那次调用的诊断给全**。
 
-## 5. 身份模型（关键细节，待拍板见 §9）
+## 5. 身份模型（已定：本人为默认；bot-only 操作走 bot，但由 MCP 按人限权）
 
-Lark 的两种身份决定"消息以谁的名义出现"：
-- **审批**：API 用 bot token + payload `open_id` 表示提交人 → server 强制 `open_id=调用者本人`，天然正确归属。
-- **IM 发消息**：要让消息显示"来自该员工本人"，server 需持有**该员工的 Lark user token**（员工 login 时一次 OAuth 授权给 server）。否则只能以 bot 名义发。
+三类操作，三种执行身份：
 
-**推荐**：员工那"一次 login" = 对 MCP server 的 OAuth，**一箭双雕**：① 认证他是谁（喂给 RBAC）② 授予 server 一枚**可吊销的本人 scoped token**，用于以他本人身份发消息。仍是"一次登录"，不破坏零配置。
+1. **普通操作 → 员工本人 user token**（发消息 / 读自己 / 查本部门）。员工 login 时一次 OAuth 把本人 scoped token 托管给 server；消息显示"来自本人"，归属天然正确。这个"一次 login"一箭双雕：① 认证他是谁（喂 RBAC）② 授 server 一枚可吊销的本人 token 用于代发。
+2. **on-behalf 类 bot 操作 → bot token + server 强制注入本人 open_id**（如审批提交）。这类 API 设计只收 bot token，提交人靠 payload 的 `open_id` 字段；server 强制 `open_id=调用者本人` → 归属仍=本人、杜绝冒名。
+3. **纯 bot 操作 → bot token**（如全组织通讯录导出，这类 API 只认 bot）。bot 拥有 app 全权，**但 MCP 层正是"按人切分 bot 权限"的地方**——员工永远拿不到 `--as bot` 裸权，只能触发被 allowlist + RBAC 授权给他的、包了一层的具体 bot 工具，参数也受限。
+
+> **bot 的全权只在服务端、被工具面切成粒度。** 员工不是"能用 bot"，而是"能用某几个内部走 bot 的工具"。
+
+### 顺带解决一个 P0：bot 操作恢复可追责
+
+bot 操作在 Lark 后台原本只记为"应用"、追不到具体人（见 [rollout-plan 的 T1](./permission-rollout-plan.md)）。现在所有 bot-backed 调用都**先过 MCP 认人**，server 审计把每次 bot 操作绑定到真实员工——bot 的全权被关进"每工具、每角色、可审计到人"的笼子里。这是把 bot 操作收拢到隔离层后**白捡的账责闭合**。
 
 ## 6. RBAC（复用 bot-v2 Firestore）
 
@@ -109,14 +115,17 @@ Lark 的两种身份决定"消息以谁的名义出现"：
 - **远程 MCP + OAuth**：员工把 MCP server 加进 Claude Code 后 login 一次即可（Claude Code 支持远程 MCP server + OAuth —— ⚠️ 确切配置机制建站时验证）。
 - **终极零配置**：用 managed/enterprise settings 把 MCP server 配置**中央下发**给所有员工，员工开机只 login（⚠️ Claude Code managed settings 能否下发 MCP server 配置，建站时验证）。
 
-## 9. 待拍板的细节（探讨中）
+## 9. 细节决策
 
-1. **身份模型**：IM 发消息以"员工本人"（每人 Lark OAuth 交 server 托管）还是"以 bot 名义"？→ 倾向本人（§5），但要员工多授一次 Lark OAuth。
-2. **首批工具集**：先上哪几个？建议 `send_message` + `list_my_approvals` + `submit_approval` 三个跑通闭环。
-3. **执行后端接法**：MCP server 内部**进程内 import lark-lig**（快、无冷启动）还是 **subprocess 调 CLI**（隔离好、天然拿三件套）？
+**① 身份模型 — ✅ 已定（2026-07-10）**：本人为默认；on-behalf 类 bot 操作走 bot + 强制本人 open_id；纯 bot 操作走 bot 但由 MCP 按人 allowlist + RBAC 限权、审计绑定到人（详见 §5）。
+
+以下锁定到推荐默认，无异议即按此推进：
+
+2. **首批工具集**：`send_message` + `list_my_approvals` + `submit_approval` 三个跑通闭环。
+3. **执行后端接法**：先用 **subprocess 调 lark-lig**（天然拿原始三件套 + 隔离，崩了不拖垮 server），性能有需要再优化成进程内 import。
 4. **eval 方式**（三要素③）：一个 harness 以"测试员工"身份连 MCP，断言"放行的能过 / 禁的被拦 / 反馈没被吞"。
-5. **托管**：复用 `abl-bot-v2` VM 还是新起？secret/token 轮换与吊销流程。
-6. **错误码表**：定一张稳定 `error_code` 枚举，让 agent 有稳定契约建 skill。
+5. **托管**：复用 `abl-bot-v2` VM（现关停需重拉）；token 轮换/吊销走 Firestore。
+6. **错误码表**：定一张稳定 `error_code` 枚举（`PERMISSION_DENIED`/`TOKEN_EXPIRED`/`RATE_LIMITED`…），让 agent 有稳定契约建 skill。
 
 ## 10. 分阶段
 
