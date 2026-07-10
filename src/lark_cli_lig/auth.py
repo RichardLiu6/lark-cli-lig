@@ -75,6 +75,9 @@ class TokenManager:
         "approval:approval",
         "approval:approval:readonly",
         "approval:definition",
+        # send-file 需要；app 只开通了经典版 im:resource，
+        # 不要换成细粒度 im:resource:upload（授权页会报 20027）
+        "im:resource",
     ]
 
     def __init__(
