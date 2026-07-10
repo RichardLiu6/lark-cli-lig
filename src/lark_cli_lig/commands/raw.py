@@ -33,6 +33,11 @@ def api_cmd(ctx: click.Context, method: str, path: str, body: str | None, params
       lark-lig api POST /open-apis/im/v1/messages --body '{"receive_id":"ou_xxx",...}'
       lark-lig api GET /open-apis/contact/v3/users --params '{"department_id":"0","page_size":"3"}'
     """
+    # Raw API passthrough bypasses every command-level restriction, so it is
+    # admin-only. Blocks non-admin roles before any token is minted.
+    from ..policy import require_raw_api
+    require_raw_api()
+
     # Normalise path: ensure it starts with /open-apis/
     if not path.startswith("/open-apis/"):
         if path.startswith("/"):

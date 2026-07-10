@@ -316,12 +316,60 @@ class TokenManager:
             except (json.JSONDecodeError, KeyError):
                 pass
 
+        # Cache has a token but no open_id: the OIDC token-exchange endpoint does
+        # not return profile fields, so open_id is often None right after login.
+        # Fetch it from /authen/v1/user_info and backfill the cache (self-heals
+        # tokens stored by older logins).
+        open_id = self._fetch_open_id_from_user_info()
+        if open_id:
+            return open_id
+
         raise click.ClickException(
             "Cannot determine your open_id. Please login first:\n"
             "  lark auth login\n"
             "\n"
             "This will open a browser for Lark OAuth and store your identity."
         )
+
+    def _fetch_open_id_from_user_info(self) -> str | None:
+        """Call /authen/v1/user_info with the user token; backfill cache on success."""
+        try:
+            user_token = self.get_user_token()
+        except click.ClickException:
+            return None
+
+        url = f"{self.domain}/open-apis/authen/v1/user_info"
+        try:
+            with httpx.Client() as client:
+                resp = client.get(url, headers={"Authorization": f"Bearer {user_token}"})
+                resp.raise_for_status()
+                body = resp.json()
+        except Exception as exc:
+            logger.warning("user_info fetch failed: %s", exc)
+            return None
+
+        if body.get("code") != 0:
+            logger.warning("user_info returned error: %s", body.get("msg", body))
+            return None
+
+        info = body.get("data", {})
+        open_id = info.get("open_id")
+        if not open_id:
+            return None
+
+        # Backfill the cached user record so subsequent calls hit the cache.
+        cached = self._keyring_get(self.USER_KEY)
+        if cached:
+            try:
+                data = json.loads(cached)
+                data["open_id"] = open_id
+                data.setdefault("name", info.get("name"))
+                data.setdefault("user_id", info.get("user_id"))
+                data.setdefault("email", info.get("email"))
+                self._keyring_set(self.USER_KEY, json.dumps(data))
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return open_id
 
     # ── Logout ────────────────────────────────────────────────────────
 

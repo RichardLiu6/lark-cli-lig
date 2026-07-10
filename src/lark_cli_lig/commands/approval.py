@@ -321,9 +321,25 @@ def approval_submit(ctx: click.Context, json_input: str) -> None:
         raise click.ClickException("Missing 'approval_code' in JSON")
 
     form = input_data.get("form", [])
-    # Get open_id: from JSON input, or from logged-in user
+    # Get open_id: from JSON input, or from logged-in user.
     open_id = input_data.get("open_id", "")
-    if not open_id:
+
+    # Anti-impersonation: non-admin roles may only submit as themselves. If the
+    # payload names someone else, override it with the caller's own open_id and
+    # warn. (Approval identity is a payload field, not an auth token — without
+    # this, anyone could file approvals in a colleague's name.)
+    from ..policy import allows_foreign_open_id
+    if not allows_foreign_open_id():
+        tm = TokenManager(APP_ID, APP_SECRET, DOMAIN)
+        own = tm.get_current_open_id()
+        if open_id and open_id != own:
+            click.echo(
+                f"Warning: role not allowed to submit on behalf of {open_id}; "
+                f"submitting as yourself ({own}).",
+                err=True,
+            )
+        open_id = own
+    elif not open_id:
         tm = TokenManager(APP_ID, APP_SECRET, DOMAIN)
         open_id = tm.get_current_open_id()
 

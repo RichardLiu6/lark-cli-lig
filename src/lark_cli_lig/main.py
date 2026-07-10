@@ -22,6 +22,12 @@ def cli(ctx: click.Context, identity: str, verbose: int) -> None:
     ctx.obj["verbose"] = verbose
     setup_logging(verbose)
 
+    # Non-admin roles may not request the tenant (bot) token. This covers every
+    # command that honours --as (send/read/users/…) in one place.
+    if identity == "bot":
+        from .policy import require_bot_identity
+        require_bot_identity()
+
     # Check config on all commands except 'auth' (which is used for setup)
     from .config import require_app_config
     if ctx.invoked_subcommand != "auth":

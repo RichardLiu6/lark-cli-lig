@@ -30,6 +30,12 @@ APP_ID: str = os.getenv("LARK_APP_ID", "")
 APP_SECRET: str = os.getenv("LARK_APP_SECRET", "")
 DOMAIN: str = os.getenv("LARK_DOMAIN", "https://open.larksuite.com")
 
+# Client-side capability role. Default "admin" = full, unrestricted (Richard).
+# Any other value = restricted "member" (no bot identity, no raw `api`, approval
+# self-only). See policy.py — this is an accident-prevention layer, NOT a real
+# security boundary while APP_SECRET is on the machine.
+ROLE: str = (os.getenv("LARK_LIG_ROLE", "admin") or "admin").strip().lower()
+
 
 def require_app_config() -> None:
     """Check APP_ID and APP_SECRET are set. Print helpful message if not."""
