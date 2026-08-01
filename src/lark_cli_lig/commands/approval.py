@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -13,6 +14,16 @@ from ..api import LarkAPI, LarkAPIError
 from ..auth import TokenManager
 from ..config import APP_ID, APP_SECRET, DOMAIN
 from ..utils import format_timestamp
+
+
+# Per-type query in `approval my`: one retry absorbs transient server errors
+# (e.g. 1395001 "internal error") instead of silently dropping a whole type.
+_QUERY_ATTEMPTS = 2
+_QUERY_RETRY_DELAY = 0.5
+
+# Marker prefix for a partially-loaded list. Deliberately contains no
+# UUID-shaped text so callers grepping instance codes stay unaffected.
+INCOMPLETE_MARKER = "!! INCOMPLETE LIST"
 
 
 def _make_api(ctx: click.Context) -> LarkAPI:
@@ -109,18 +120,34 @@ def approval_my(ctx: click.Context, count: int, approval_type: str | None, statu
             )
         body["approval_code"] = code
     else:
-        # Without approval_code, query all known types and merge
+        # Without approval_code, query all known types and merge.
+        # A per-type failure must NEVER be swallowed: the merged list is then
+        # silently short by a whole type, and later entries slide into the
+        # top-N window. Callers that diff this list (approval-submit-verify
+        # hook) would read that as "old instances appeared / new one absent".
+        # Seen 2026-07-31: payment type returned 1395001 "internal error".
         all_instances = []
+        failed_types: list[tuple[str, str]] = []
         for atype, acode in type_map.items():
-            try:
-                data = api.post(
-                    f"/open-apis/approval/v4/instances/query?page_size={api_page_size}",
-                    body={**body, "approval_code": acode},
-                )
-                for inst in data.get("instance_list", []):
-                    all_instances.append(inst)
-            except LarkAPIError:
-                continue
+            last_err: LarkAPIError | None = None
+            for attempt in range(_QUERY_ATTEMPTS):
+                try:
+                    data = api.post(
+                        f"/open-apis/approval/v4/instances/query?page_size={api_page_size}",
+                        body={**body, "approval_code": acode},
+                    )
+                    for inst in data.get("instance_list", []):
+                        all_instances.append(inst)
+                    last_err = None
+                    break
+                except LarkAPIError as e:
+                    # 1395001 & friends are transient server-side hiccups;
+                    # one retry recovers them without a visible gap.
+                    last_err = e
+                    if attempt < _QUERY_ATTEMPTS - 1:
+                        time.sleep(_QUERY_RETRY_DELAY)
+            if last_err is not None:
+                failed_types.append((atype, str(last_err.code)))
         # Sort by start_time desc
         all_instances.sort(
             key=lambda x: x.get("instance", {}).get("start_time", "0"),
@@ -128,6 +155,7 @@ def approval_my(ctx: click.Context, count: int, approval_type: str | None, statu
         )
         items = all_instances[:count]
         _print_instance_list(items, status_filter)
+        _warn_incomplete(failed_types)
         return
 
     try:
@@ -140,6 +168,25 @@ def approval_my(ctx: click.Context, count: int, approval_type: str | None, statu
 
     items = data.get("instance_list", [])
     _print_instance_list(items, status_filter)
+
+
+def _warn_incomplete(failed_types: list[tuple[str, str]]) -> None:
+    """Announce a partially-loaded list on BOTH stdout and stderr.
+
+    stdout carries it too because scripted callers commonly run this command
+    with `2>/dev/null`; a truncated list that looks complete is the dangerous
+    case, so the warning has to travel on the stream they actually read.
+    """
+    if not failed_types:
+        return
+    detail = ", ".join(f"{atype} (error {code})" for atype, code in failed_types)
+    line = (
+        f"{INCOMPLETE_MARKER} — {len(failed_types)} approval type(s) failed to load "
+        f"after {_QUERY_ATTEMPTS} attempts: {detail}. "
+        "The list above is missing those types — do not treat it as complete."
+    )
+    click.echo(line)
+    click.echo(line, err=True)
 
 
 def _print_instance_list(items: list, status_filter: str | None = None) -> None:
