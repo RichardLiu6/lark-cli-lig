@@ -36,6 +36,8 @@ LARK_DOMAIN=https://open.larksuite.com   # or https://open.feishu.cn
 | `lark-lig approval types` | List approval definitions |
 | `lark-lig approval list` | List submitted approvals |
 | `lark-lig approval get` | Get approval instance details |
+| `lark-lig approval comment <process-no> <text>` | Add and verify an approval comment |
+| `lark-lig approval comments <process-no>` | List approval comments |
 | `lark-lig approval upload` | Upload an image for approval (PDF auto-convert) |
 | `lark-lig approval submit` | Submit an approval instance from JSON |
 | `lark-lig api` | Call any Lark Open API endpoint directly |

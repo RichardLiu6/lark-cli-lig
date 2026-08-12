@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,20 @@ _QUERY_RETRY_DELAY = 0.5
 # Marker prefix for a partially-loaded list. Deliberately contains no
 # UUID-shaped text so callers grepping instance codes stay unaffected.
 INCOMPLETE_MARKER = "!! INCOMPLETE LIST"
+
+APPROVAL_TYPE_CODES = {
+    "purchase": "1C6CDDFA-3222-4D4E-A2E3-1BB2C6B5CA84",
+    "reimbursement": "89618889-E377-43E4-86E3-A421CFB4B845",
+    "overtime": "8FF508FD-EC2B-4625-90C0-5C695DA80084",
+    "leave": "4EFC010E-2264-49EC-ACB4-5B520828F3C7",
+    "payment": "71CC45C9-955B-4CF3-9D4A-A65E8E66E2BA",
+}
+
+_INSTANCE_CODE_RE = re.compile(
+    r"^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$",
+    re.IGNORECASE,
+)
+_PROCESS_NUMBER_RE = re.compile(r"^\d{12}$")
 
 
 def _make_api(ctx: click.Context) -> LarkAPI:
@@ -93,13 +108,7 @@ def approval_types(ctx: click.Context) -> None:
 def approval_my(ctx: click.Context, count: int, approval_type: str | None, status_filter: str | None) -> None:
     """List my submitted approvals."""
     # Map type shortcuts to approval codes
-    type_map = {
-        "purchase": "1C6CDDFA-3222-4D4E-A2E3-1BB2C6B5CA84",
-        "reimbursement": "89618889-E377-43E4-86E3-A421CFB4B845",
-        "overtime": "8FF508FD-EC2B-4625-90C0-5C695DA80084",
-        "leave": "4EFC010E-2264-49EC-ACB4-5B520828F3C7",
-        "payment": "71CC45C9-955B-4CF3-9D4A-A65E8E66E2BA",
-    }
+    type_map = APPROVAL_TYPE_CODES
 
     api = _make_api(ctx)
 
@@ -276,6 +285,158 @@ def approval_get(ctx: click.Context, instance_code: str) -> None:
             if comment:
                 line += f" \u2014 {comment}"
             click.echo(line)
+
+
+def _resolve_instance_reference(api: LarkAPI, reference: str) -> tuple[str, str]:
+    """Resolve a user-facing process number or an internal instance code.
+
+    Lark does not expose a direct lookup endpoint for process numbers. Its
+    instance-query response does include ``serial_id``, so scan the known ABL
+    approval definitions and keep the UUID private from normal CLI output.
+    """
+    reference = reference.strip()
+    if _INSTANCE_CODE_RE.fullmatch(reference):
+        inst = api.get(f"/open-apis/approval/v4/instances/{reference}")
+        return reference, str(inst.get("serial_number", ""))
+
+    if not _PROCESS_NUMBER_RE.fullmatch(reference):
+        raise click.ClickException(
+            "Approval reference must be a 12-digit process number "
+            "(for example 202608120002) or an instance code."
+        )
+
+    failed_types: list[str] = []
+    query_body = {
+        # The current Lark query endpoint is reliable for this tenant only with
+        # the same broad range used by `approval my`.
+        "start_time": "1700000000000",
+        "end_time": "1800000000000",
+    }
+    for approval_type, approval_code in APPROVAL_TYPE_CODES.items():
+        try:
+            data = api.post(
+                "/open-apis/approval/v4/instances/query?page_size=100",
+                body={**query_body, "approval_code": approval_code},
+            )
+        except LarkAPIError:
+            failed_types.append(approval_type)
+            continue
+
+        for item in data.get("instance_list", []):
+            inst = item.get("instance", {})
+            serial = str(inst.get("serial_id", inst.get("serial_number", "")))
+            if serial == reference:
+                code = str(inst.get("code", item.get("instance_code", "")))
+                if code:
+                    return code, serial
+
+    suffix = ""
+    if failed_types:
+        suffix = f" ({', '.join(failed_types)} could not be searched)"
+    raise click.ClickException(
+        f"Process number {reference} was not found in known approval types{suffix}."
+    )
+
+
+def _comment_params() -> dict[str, str]:
+    tm = TokenManager(APP_ID, APP_SECRET, DOMAIN)
+    return {
+        "user_id": tm.get_current_open_id(),
+        "user_id_type": "open_id",
+    }
+
+
+def _decode_comment_text(content: object) -> str:
+    if isinstance(content, dict):
+        return str(content.get("text", ""))
+    if not isinstance(content, str):
+        return str(content)
+    try:
+        decoded = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    if isinstance(decoded, dict):
+        return str(decoded.get("text", content))
+    return content
+
+
+@approval.command("comment")
+@click.argument("approval_ref")
+@click.argument("text")
+@click.option(
+    "--verify/--no-verify",
+    default=True,
+    help="Read comments back after creation to verify the new comment (default: verify).",
+)
+@click.pass_context
+def approval_comment(
+    ctx: click.Context,
+    approval_ref: str,
+    text: str,
+    verify: bool,
+) -> None:
+    """Add a comment using a searchable process number or instance code."""
+    api = _make_api(ctx)
+    try:
+        instance_code, process_number = _resolve_instance_reference(api, approval_ref)
+        params = _comment_params()
+        path = f"/open-apis/approval/v4/instances/{instance_code}/comments"
+        data = api.post(
+            path,
+            params=params,
+            body={
+                "content": json.dumps(
+                    {"text": text, "files": []},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "disable_bot": False,
+            },
+        )
+        comment_id = str(data.get("comment_id", ""))
+
+        if verify:
+            comments = api.get(path, params={**params, "page_size": "50"}).get(
+                "comments", []
+            )
+            if not any(str(item.get("id", "")) == comment_id for item in comments):
+                raise click.ClickException(
+                    "Comment creation returned success, but read-back verification failed."
+                )
+    except LarkAPIError as e:
+        raise click.ClickException(str(e))
+
+    label = process_number or approval_ref
+    suffix = " and verified" if verify else ""
+    click.echo(f"Process {label}: comment added{suffix}.")
+
+
+@approval.command("comments")
+@click.argument("approval_ref")
+@click.pass_context
+def approval_comments(ctx: click.Context, approval_ref: str) -> None:
+    """List comments using a searchable process number or instance code."""
+    api = _make_api(ctx)
+    try:
+        instance_code, process_number = _resolve_instance_reference(api, approval_ref)
+        params = {**_comment_params(), "page_size": "50"}
+        data = api.get(
+            f"/open-apis/approval/v4/instances/{instance_code}/comments",
+            params=params,
+        )
+    except LarkAPIError as e:
+        raise click.ClickException(str(e))
+
+    label = process_number or approval_ref
+    comments = [c for c in data.get("comments", []) if not c.get("is_delete")]
+    click.echo(f"Comments for process {label}")
+    if not comments:
+        click.echo("No comments found")
+        return
+
+    for item in comments:
+        created = format_timestamp(item.get("create_time", ""))
+        click.echo(f"[{created}] {_decode_comment_text(item.get('content', ''))}")
 
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic"}

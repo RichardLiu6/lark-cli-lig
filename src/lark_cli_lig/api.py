@@ -79,8 +79,8 @@ class LarkAPI:
     def get(self, path: str, params: dict = None) -> dict:
         return self._request("GET", path, params=params)
 
-    def post(self, path: str, body: dict = None) -> dict:
-        return self._request("POST", path, json=body)
+    def post(self, path: str, body: dict = None, params: dict = None) -> dict:
+        return self._request("POST", path, json=body, params=params)
 
     def upload(self, path: str, files: dict, data: dict = None) -> dict:
         """Multipart upload (for images/files)"""
