@@ -170,7 +170,7 @@ bot 操作在 Lark 后台原本只记为"应用"、追不到具体人（见 [rol
 4. 同一员工同一 scope 的待授权请求去重，避免一段代码循环触发多次授权链接。
 5. 每次授权（前集合 / 请求集合 / 后集合 / diff 结果）写审计日志，可追溯"谁的 scope 在何时被谁改小了"。
 
-**本地过渡方案（已在做）**：`~/.claude/scripts/lark-auth-add` 脚本 + PreToolUse hook——拦截裸 `auth login --scope X`，改为"读现有 scope → 取并集 → 授权 → diff → 写日志"。**其并集 / diff / 日志逻辑将原样搬进 server 绑定层**，本地脚本的 eval 用例同步迁为 server eval（§9 ④）。
+**本地过渡方案（✅ 10-29 已落地）**：`~/.claude/scripts/lark-auth-add` 脚本 + PreToolUse hook `~/.claude/hooks/lark-auth-guard.sh`（eval `~/.claude/hooks/tests/test-lark-auth-add.py` 21/21）——拦截裸 `auth login --scope X`，改为"读现有 scope → 取并集 → 授权 → diff → 写日志"。**其并集 / diff / 日志逻辑将原样搬进 server 绑定层**，本地脚本的 eval 用例同步迁为 server eval（§9 ④）。
 
 ## 6. RBAC（复用 bot-v2 Firestore）
 
